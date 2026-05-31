@@ -1,0 +1,5 @@
+tests\
+.test-tmp\
+*.ts\
+!dist/**/*.d.ts\
+!dist/**/*.js

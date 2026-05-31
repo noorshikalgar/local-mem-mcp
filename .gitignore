@@ -4,3 +4,7 @@ dist/
 *.db-journal
 coverage/
 .env
+
+.test-tmp/
+*.db-shm
+*.db-wal
