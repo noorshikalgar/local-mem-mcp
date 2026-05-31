@@ -11,6 +11,13 @@ interface CLIOptions {
   embeddingApiUrl?: string;
   embeddingApiKey?: string;
   embeddingModel?: string;
+  qdrantUrl?: string;
+  qdrantApiKey?: string;
+  neo4jUrl?: string;
+  neo4jPassword?: string;
+  llmApiUrl?: string;
+  llmApiKey?: string;
+  llmModel?: string;
   noWatch?: boolean;
 }
 
@@ -38,6 +45,27 @@ function parseArgs(): CLIOptions {
       case "--embedding-model":
         opts.embeddingModel = args[++i];
         break;
+      case "--qdrant-url":
+        opts.qdrantUrl = args[++i];
+        break;
+      case "--qdrant-api-key":
+        opts.qdrantApiKey = args[++i];
+        break;
+      case "--neo4j-url":
+        opts.neo4jUrl = args[++i];
+        break;
+      case "--neo4j-password":
+        opts.neo4jPassword = args[++i];
+        break;
+      case "--llm-url":
+        opts.llmApiUrl = args[++i];
+        break;
+      case "--llm-key":
+        opts.llmApiKey = args[++i];
+        break;
+      case "--llm-model":
+        opts.llmModel = args[++i];
+        break;
       case "--no-watch":
         opts.noWatch = true;
         break;
@@ -55,6 +83,13 @@ Options:
   --embedding-url <url>      OpenAI-compatible embedding API URL
   --embedding-key <key>      API key for embedding service
   --embedding-model <model>  Embedding model name (default: bge-small)
+  --qdrant-url <url>         Qdrant vector DB URL (default: http://localhost:6333)
+  --qdrant-api-key <key>     API key for Qdrant
+  --neo4j-url <url>          Neo4j graph DB URL (default: bolt://localhost:7687)
+  --neo4j-password <pass>    Neo4j password (default: neo4j)
+  --llm-url <url>            LM Studio / OpenAI-compatible LLM API URL (default: http://localhost:1234/v1)
+  --llm-key <key>            API key for LLM service
+  --llm-model <model>        LLM model name (default: local-model)
   --no-watch                 Disable file watching
   -h, --help                 Show this help
 `);
@@ -79,6 +114,14 @@ async function main() {
     embeddingApiUrl: opts.embeddingApiUrl,
     embeddingApiKey: opts.embeddingApiKey,
     embeddingModel: opts.embeddingModel,
+    qdrantUrl: opts.qdrantUrl,
+    qdrantApiKey: opts.qdrantApiKey,
+    neo4jUrl: opts.neo4jUrl,
+    neo4jPassword: opts.neo4jPassword,
+    llmApiUrl: opts.llmApiUrl,
+    llmApiKey: opts.llmApiKey,
+    llmModel: opts.llmModel,
+    useLlmSummaries: !!opts.llmApiUrl,
     useFileWatcher: !opts.noWatch,
   });
 

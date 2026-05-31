@@ -6,10 +6,13 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import type { IndexConfig } from "./types.js";
 import { SQLiteStore } from "./stores/sqlite-store.js";
-import { NoOpVectorStore, OpenAICompatibleVectorStore } from "./stores/vector-store.js";
+import { NoOpVectorStore, OpenAICompatibleVectorStore, QdrantVectorStore } from "./stores/vector-store.js";
+import { SqliteGraphStore, Neo4jGraphStore } from "./stores/graph-store.js";
+import type { GraphStore } from "./stores/graph-store.js";
 import { Indexer } from "./watcher/indexer.js";
 import { FileSummaryManager } from "./memory/file-summary.js";
 import { ModuleSummaryManager } from "./memory/module-summary.js";
+import { LLMSummarizer } from "./llm/summarizer.js";
 import { DecisionManager } from "./memory/decisions.js";
 import { RulesManager } from "./memory/rules.js";
 import { TaskMemoryManager } from "./memory/task-memory.js";
@@ -31,6 +34,14 @@ export interface MCPServerOptions {
   embeddingApiUrl?: string;
   embeddingApiKey?: string;
   embeddingModel?: string;
+  qdrantUrl?: string;
+  qdrantApiKey?: string;
+  neo4jUrl?: string;
+  neo4jPassword?: string;
+  llmApiUrl?: string;
+  llmApiKey?: string;
+  llmModel?: string;
+  useLlmSummaries?: boolean;
   useFileWatcher?: boolean;
 }
 
@@ -47,39 +58,71 @@ export async function createMCPServer(opts: MCPServerOptions): Promise<Server> {
       "**/*.yaml", "**/*.yml", "**/*.md",
     ],
     excludePatterns: [
-      "node_modules/**", "dist/**", "build/**", ".git/**",
-      "coverage/**", ".next/**", "target/**", "vendor/**",
-      "*.min.*",
+      "node_modules", "dist", "build", ".git",
+      "coverage", ".next", "target", "vendor",
+      ".test-tmp", "__pycache__", ".cache",
     ],
     maxFileSize: 1024 * 100,
     chunkSize: 50,
     chunkOverlap: 10,
     useGit: true,
     useFileWatcher: opts.useFileWatcher ?? true,
-    embeddingProvider: opts.embeddingApiUrl ? "openai" : "none",
+    embeddingProvider: opts.qdrantUrl ? "qdrant" : opts.embeddingApiUrl ? "openai" : "none",
     embeddingApiUrl: opts.embeddingApiUrl,
     embeddingApiKey: opts.embeddingApiKey,
     embeddingModel: opts.embeddingModel || "bge-small",
+    qdrantUrl: opts.qdrantUrl,
+    qdrantApiKey: opts.qdrantApiKey,
+    neo4jUrl: opts.neo4jUrl,
+    neo4jPassword: opts.neo4jPassword,
+    vectorSize: 384,
+    llmApiUrl: opts.llmApiUrl,
+    llmApiKey: opts.llmApiKey,
+    llmModel: opts.llmModel || "local-model",
+    useLlmSummaries: opts.useLlmSummaries ?? !!opts.llmApiUrl,
   };
 
   const store = new SQLiteStore({ dbPath });
-  const vectorStore = indexConfig.embeddingProvider === "openai" && indexConfig.embeddingApiUrl
-    ? new OpenAICompatibleVectorStore({
-        apiUrl: indexConfig.embeddingApiUrl,
-        apiKey: indexConfig.embeddingApiKey || "",
-        model: indexConfig.embeddingModel,
+  const graphStore: GraphStore = indexConfig.neo4jUrl
+    ? new Neo4jGraphStore({
+        url: indexConfig.neo4jUrl,
+        password: indexConfig.neo4jPassword || "neo4j",
       })
-    : new NoOpVectorStore();
+    : new SqliteGraphStore(store);
+  const vectorStore = indexConfig.embeddingProvider === "qdrant" && indexConfig.qdrantUrl
+    ? new QdrantVectorStore({
+        qdrantUrl: indexConfig.qdrantUrl,
+        qdrantApiKey: indexConfig.qdrantApiKey,
+        embeddingApiUrl: indexConfig.embeddingApiUrl || "http://localhost:1234/v1",
+        embeddingApiKey: indexConfig.embeddingApiKey,
+        embeddingModel: indexConfig.embeddingModel,
+      })
+    : indexConfig.embeddingProvider === "openai" && indexConfig.embeddingApiUrl
+      ? new OpenAICompatibleVectorStore({
+          apiUrl: indexConfig.embeddingApiUrl,
+          apiKey: indexConfig.embeddingApiKey || "",
+          model: indexConfig.embeddingModel,
+        })
+      : new NoOpVectorStore();
+
+  // Initialize LLM summarizer (optional)
+  const llmSummarizer = indexConfig.useLlmSummaries && indexConfig.llmApiUrl
+    ? new LLMSummarizer({
+        apiUrl: indexConfig.llmApiUrl,
+        apiKey: indexConfig.llmApiKey,
+        model: indexConfig.llmModel,
+      })
+    : null;
 
   // Initialize managers
-  const indexer = new Indexer(store, vectorStore, indexConfig);
-  const fileSummaryManager = new FileSummaryManager(store, indexConfig);
-  const moduleSummaryManager = new ModuleSummaryManager(store, indexConfig);
+  const indexer = new Indexer(store, vectorStore, graphStore, indexConfig);
+  const fileSummaryManager = new FileSummaryManager(store, indexConfig, llmSummarizer);
+  const moduleSummaryManager = new ModuleSummaryManager(store, indexConfig, llmSummarizer);
   const decisionManager = new DecisionManager(store);
   const rulesManager = new RulesManager(store);
   const taskMemoryManager = new TaskMemoryManager(store);
   const sessionMemoryManager = new SessionMemoryManager(store);
-  const retrievalPipeline = new RetrievalPipeline(store, vectorStore, indexConfig);
+  const retrievalPipeline = new RetrievalPipeline(store, vectorStore, graphStore, indexConfig);
   const compactor = new Compactor(store, indexConfig, fileSummaryManager, moduleSummaryManager, decisionManager);
   const gitService = new GitService(projectRoot);
   const searchEngine = new SearchEngine(store, vectorStore);
@@ -549,8 +592,8 @@ export async function createMCPServer(opts: MCPServerOptions): Promise<Server> {
         const relFile = args?.file as string;
         const depth = (args?.depth as number) || 1;
 
-        const relations = store.findRelatedFiles(relFile, depth);
-        const affected = store.findAffectedFiles(relFile);
+        const relations = await graphStore.findRelatedFiles(relFile, depth);
+        const affected = await graphStore.findAffectedFiles(relFile);
         const decisions4File = decisionManager.getDecisionsForFile(relFile);
 
         return {
@@ -576,7 +619,7 @@ export async function createMCPServer(opts: MCPServerOptions): Promise<Server> {
 
       case "impact_analysis": {
         const impactTarget = args?.target as string;
-        const affected = store.findAffectedFiles(impactTarget);
+        const affected = await graphStore.findAffectedFiles(impactTarget);
         const summary = fileSummaryManager.getFileSummary(impactTarget);
         const decisions4Impact = decisionManager.getDecisionsForFile(impactTarget);
 
@@ -586,8 +629,10 @@ export async function createMCPServer(opts: MCPServerOptions): Promise<Server> {
         else if (affected.files.length > 0) riskLevel = "medium";
 
         // Get routes
-        const routeRelations = store.findRelatedFiles(impactTarget)
-          .filter((r) => r.relationType === "imports" && r.targetFile?.includes("route"));
+        const allRelations = await graphStore.findRelatedFiles(impactTarget);
+        const routeRelations = allRelations.filter(
+          (r) => r.relationType === "imports" && r.targetFile?.includes("route"),
+        );
 
         return {
           content: [{
@@ -818,6 +863,7 @@ export async function createMCPServer(opts: MCPServerOptions): Promise<Server> {
               risk: contextPack.risk,
               suggestedWorkflow: contextPack.suggestedWorkflow,
               estimatedTokens: contextPack.estimatedTokens,
+              warnings: contextPack.warnings,
             }, null, 2),
           }],
         };

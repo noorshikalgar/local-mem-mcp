@@ -3,9 +3,10 @@ import * as path from "node:path";
 import type { IndexConfig, FileDiff } from "../types.js";
 import { SQLiteStore } from "../stores/sqlite-store.js";
 import type { VectorStore } from "../stores/vector-store.js";
+import type { GraphStore } from "../stores/graph-store.js";
 import { FileScanner } from "../indexing/file-scanner.js";
 import { Chunker } from "../indexing/chunker.js";
-import { parseCode } from "../indexing/parser.js";
+import { parseCodeAsync } from "../indexing/parser.js";
 import { FileSummaryManager } from "../memory/file-summary.js";
 import { ModuleSummaryManager } from "../memory/module-summary.js";
 import { GitService } from "../indexing/git.js";
@@ -14,6 +15,7 @@ import * as crypto from "node:crypto";
 export class Indexer {
   private store: SQLiteStore;
   private vectorStore: VectorStore;
+  private graphStore: GraphStore;
   private config: IndexConfig;
   private chunker: Chunker;
   private fileScanner: FileScanner;
@@ -24,10 +26,12 @@ export class Indexer {
   constructor(
     store: SQLiteStore,
     vectorStore: VectorStore,
+    graphStore: GraphStore,
     config: IndexConfig,
   ) {
     this.store = store;
     this.vectorStore = vectorStore;
+    this.graphStore = graphStore;
     this.config = config;
     this.chunker = new Chunker(config);
     this.fileScanner = new FileScanner(config);
@@ -56,7 +60,7 @@ export class Indexer {
     const modManager = new ModuleSummaryManager(this.store, this.config);
     const moduleFiles = modManager.detectModules(allFileSummaries);
     for (const [moduleName, files] of moduleFiles) {
-      modManager.generateModuleSummary(moduleName, files);
+      await modManager.generateModuleSummary(moduleName, files);
     }
 
     return { filesIndexed, chunksIndexed };
@@ -80,7 +84,7 @@ export class Indexer {
     }
 
     // Generate file summary
-    const fileSummary = this.fileSummaryManager.generateSummary(
+    const fileSummary = await this.fileSummaryManager.generateSummary(
       relativePath,
       relativePath,
       language,
@@ -88,7 +92,7 @@ export class Indexer {
     );
 
     // Parse code
-    const parsed = parseCode(relativePath, content, language);
+    const parsed = await parseCodeAsync(relativePath, content, language);
 
     // Chunk the file
     const chunks = this.chunker.chunkFile(
@@ -103,7 +107,7 @@ export class Indexer {
 
     // Delete old chunks and relations
     this.store.deleteChunksForFile(relativePath);
-    this.store.deleteRelationsForFile(relativePath);
+    this.graphStore.deleteRelationsForFile(relativePath);
 
     // Store new chunks
     for (const chunk of chunks) {
@@ -114,7 +118,7 @@ export class Indexer {
     for (const imp of parsed.imports) {
       const relId = crypto.createHash("sha256")
         .update(`import:${relativePath}:${imp}`).digest("hex").slice(0, 16);
-      this.store.upsertRelation({
+      await this.graphStore.upsertRelation({
         id: relId,
         sourceType: "file",
         sourceName: path.basename(relativePath, path.extname(relativePath)),
@@ -163,12 +167,12 @@ export class Indexer {
     await this.indexFile(relativePath, content, language);
   }
 
-  handleFileDelete(relativePath: string): void {
+  async handleFileDelete(relativePath: string): Promise<void> {
     this.store.deleteChunksForFile(relativePath);
-    this.store.deleteRelationsForFile(relativePath);
+    await this.graphStore.deleteRelationsForFile(relativePath);
     this.store.deleteFileSummary(relativePath);
     this.store.deleteIndexState(relativePath);
-    this.vectorStore.deleteVectorsForFile(relativePath).catch(() => {});
+    await this.vectorStore.deleteVectorsForFile(relativePath).catch(() => {});
   }
 
   async refreshChangedFiles(): Promise<{ updated: number; deleted: number }> {
@@ -179,7 +183,7 @@ export class Indexer {
       const diffs = this.gitService.getDiffSummary();
       for (const diff of diffs) {
         if (diff.status === "deleted") {
-          this.handleFileDelete(diff.file);
+          await this.handleFileDelete(diff.file);
           deleted++;
         } else {
           await this.handleFileChange(diff.file);

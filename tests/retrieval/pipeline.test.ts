@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { createTestStore, createTestIndexConfig, createTestVectorStore } from "../setup.js";
 import { RetrievalPipeline } from "../../src/retrieval/pipeline.js";
+import { SqliteGraphStore } from "../../src/stores/graph-store.js";
 import { FileSummaryManager } from "../../src/memory/file-summary.js";
 import { ModuleSummaryManager } from "../../src/memory/module-summary.js";
 import { DecisionManager } from "../../src/memory/decisions.js";
@@ -10,12 +11,13 @@ import type { FileSummary } from "../../src/types.js";
 let store = createTestStore();
 let pipeline: RetrievalPipeline;
 
-beforeEach(() => {
+beforeEach(async () => {
   store.close();
   store = createTestStore();
   const config = createTestIndexConfig();
   const vectorStore = createTestVectorStore();
-  pipeline = new RetrievalPipeline(store, vectorStore, config);
+  const graphStore = new SqliteGraphStore(store);
+  pipeline = new RetrievalPipeline(store, vectorStore, graphStore, config);
 
   // Seed file summaries
   const fsManager = new FileSummaryManager(store, config);
@@ -58,8 +60,8 @@ beforeEach(() => {
   store.upsertFileSummary(adminDashboardSummary);
   store.upsertFileSummary(adminRoutesSummary);
 
-  modManager.generateModuleSummary("auth", [authServiceSummary, roleGuardSummary]);
-  modManager.generateModuleSummary("admin", [adminDashboardSummary, adminRoutesSummary]);
+  await modManager.generateModuleSummary("auth", [authServiceSummary, roleGuardSummary]);
+  await modManager.generateModuleSummary("admin", [adminDashboardSummary, adminRoutesSummary]);
 
   decManager.addDecision({
     title: "Use RoleGuard for all role checks",
@@ -121,5 +123,28 @@ describe("RetrievalPipeline", () => {
   it("should suggest workflow", async () => {
     const pack = await pipeline.retrieveContext("Add role-based access to admin dashboard");
     expect(pack.suggestedWorkflow.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("should include warnings when stale file summaries exist", async () => {
+    // Mark a file summary as stale
+    const summaries = store.getAllFileSummaries();
+    if (summaries.length > 0) {
+      store.upsertFileSummary({ ...summaries[0], status: "stale" });
+    }
+
+    const pack = await pipeline.retrieveContext("auth");
+    expect(pack.warnings.length).toBeGreaterThanOrEqual(1);
+    expect(pack.warnings[0]).toContain("stale");
+  });
+
+  it("should trim code snippets when budget is tight", async () => {
+    const tightBudget = {
+      totalTokens: 500, systemRules: 800, taskMemory: 500,
+      moduleSummaries: 200, decisionMemory: 200, codeSnippets: 100,
+      currentFileContent: 500, responseBudget: 200, reserve: 50,
+    };
+
+    const pack = await pipeline.retrieveContext("auth", { budget: tightBudget });
+    expect(pack.estimatedTokens).toBeLessThanOrEqual(450);
   });
 });

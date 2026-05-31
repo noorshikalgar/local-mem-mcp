@@ -36,7 +36,7 @@ describe("ModuleSummaryManager", () => {
     expect(moduleFiles.get("auth")).toHaveLength(2);
   });
 
-  it("should generate module summary with proper fields", () => {
+  it("should generate module summary with proper fields", async () => {
     const files: FileSummary[] = [
       {
         file: "src/auth/auth.service.ts", summary: "Auth service",
@@ -57,14 +57,14 @@ describe("ModuleSummaryManager", () => {
       },
     ];
 
-    const summary = manager.generateModuleSummary("auth", files);
+    const summary = await manager.generateModuleSummary("auth", files);
     expect(summary.module).toBe("auth");
     expect(summary.entryPoints).toContain("src/auth/auth.routes.ts");
     expect(summary.coreFiles).toContain("src/auth/auth.service.ts");
     expect(summary.doNotDuplicate).toContain("AuthService");
   });
 
-  it("should detect entry points from route files", () => {
+  it("should detect entry points from route files", async () => {
     const files: FileSummary[] = [
       {
         file: "src/admin/admin.routes.ts", summary: "Admin routes",
@@ -76,12 +76,12 @@ describe("ModuleSummaryManager", () => {
       },
     ];
 
-    const summary = manager.generateModuleSummary("admin", files);
+    const summary = await manager.generateModuleSummary("admin", files);
     expect(summary.entryPoints).toContain("src/admin/admin.routes.ts");
   });
 
-  it("should persist to store", () => {
-    const summary = manager.generateModuleSummary("test", []);
+  it("should persist to store", async () => {
+    const summary = await manager.generateModuleSummary("test", []);
     const retrieved = manager.getModuleSummary("test");
     expect(retrieved).not.toBeNull();
     expect(retrieved!.module).toBe("test");

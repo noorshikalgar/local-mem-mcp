@@ -1,6 +1,7 @@
 import * as path from "node:path";
 import type { ModuleSummary, IndexConfig, FileSummary } from "../types.js";
 import { SQLiteStore } from "../stores/sqlite-store.js";
+import type { LLMSummarizer } from "../llm/summarizer.js";
 
 const KNOWN_MODULE_KEYWORDS: Record<string, string[]> = {
   auth: ["auth", "login", "logout", "password", "token", "session", "guard", "role", "permission"],
@@ -17,10 +18,12 @@ const KNOWN_MODULE_KEYWORDS: Record<string, string[]> = {
 export class ModuleSummaryManager {
   private store: SQLiteStore;
   private config: IndexConfig;
+  private llm: LLMSummarizer | null;
 
-  constructor(store: SQLiteStore, config: IndexConfig) {
+  constructor(store: SQLiteStore, config: IndexConfig, llm: LLMSummarizer | null = null) {
     this.store = store;
     this.config = config;
+    this.llm = llm;
   }
 
   detectModules(fileSummaries: FileSummary[]): Map<string, FileSummary[]> {
@@ -57,7 +60,7 @@ export class ModuleSummaryManager {
     return "root";
   }
 
-  generateModuleSummary(moduleName: string, files: FileSummary[]): ModuleSummary {
+  async generateModuleSummary(moduleName: string, files: FileSummary[]): Promise<ModuleSummary> {
     const coreFile = files[0];
     const dir = coreFile ? path.dirname(coreFile.file) : moduleName;
 
@@ -77,7 +80,8 @@ export class ModuleSummaryManager {
     const risks = files.filter((f) => f.riskLevel === "high" || f.riskLevel === "critical");
     const riskLevel = risks.length > 0 ? "high" : files.some((f) => f.riskLevel === "medium") ? "medium" : "low";
 
-    const purpose = this.buildModulePurpose(moduleName, files, allExports, allSymbols);
+    const llmPurpose = this.llm ? await this.llm.summarizeModule(moduleName, files) : null;
+    const purpose = llmPurpose ?? this.buildModulePurpose(moduleName, files, allExports, allSymbols);
 
     const doNotDuplicate = this.buildDoNotDuplicate(allExports, files);
 
@@ -94,7 +98,7 @@ export class ModuleSummaryManager {
       relatedModules,
       lastIndexedAt: new Date().toISOString(),
       status: "fresh",
-      confidence: 0.75,
+      confidence: llmPurpose ? 0.92 : 0.75,
     };
 
     this.store.upsertModuleSummary(summary);

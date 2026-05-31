@@ -1,29 +1,35 @@
 import type { FileSummary, SupportedLanguage, IndexConfig } from "../types.js";
 import { SQLiteStore } from "../stores/sqlite-store.js";
 import { FileScanner } from "../indexing/file-scanner.js";
-import { parseCode } from "../indexing/parser.js";
+import { parseCodeAsync, type ParserResult } from "../indexing/parser.js";
+import type { LLMSummarizer } from "../llm/summarizer.js";
 import * as crypto from "node:crypto";
 
 export class FileSummaryManager {
   private store: SQLiteStore;
   private config: IndexConfig;
+  private llm: LLMSummarizer | null;
 
-  constructor(store: SQLiteStore, config: IndexConfig) {
+  constructor(store: SQLiteStore, config: IndexConfig, llm: LLMSummarizer | null = null) {
     this.store = store;
     this.config = config;
+    this.llm = llm;
   }
 
-  generateSummary(
+  async generateSummary(
     filePath: string,
     relativePath: string,
     language: SupportedLanguage,
     content: string,
-  ): FileSummary {
+  ): Promise<FileSummary> {
     const lines = content.split("\n");
-    const parsed = parseCode(relativePath, content, language);
+    const parsed = await parseCodeAsync(relativePath, content, language);
     const fileHash = crypto.createHash("sha256").update(content).digest("hex").slice(0, 16);
 
-    const summary = this.buildSummary(content, parsed);
+    const llmSummary = this.llm
+      ? await this.llm.summarizeFile(relativePath, content, parsed)
+      : null;
+    const summary = llmSummary ?? this.buildSummary(content, parsed);
 
     const riskLevel = this.inferRiskLevel(parsed, content);
 
@@ -41,14 +47,14 @@ export class FileSummaryManager {
       lastVerifiedHash: fileHash,
       lastIndexedAt: new Date().toISOString(),
       status: "fresh",
-      confidence: 0.75,
+      confidence: llmSummary ? 0.92 : 0.75,
     };
 
     this.store.upsertFileSummary(result);
     return result;
   }
 
-  private buildSummary(content: string, parsed: ReturnType<typeof parseCode>): string {
+  private buildSummary(content: string, parsed: ParserResult): string {
     const parts: string[] = [];
 
     if (parsed.exports.length > 0) {
@@ -81,7 +87,7 @@ export class FileSummaryManager {
     return parts.join(" ");
   }
 
-  private detectSideEffects(parsed: ReturnType<typeof parseCode>, content: string): string[] {
+  private detectSideEffects(parsed: ParserResult, content: string): string[] {
     const effects: string[] = [];
     if (content.includes("addEventListener") || content.includes("addListener")) {
       effects.push("registers event listeners");
@@ -104,7 +110,7 @@ export class FileSummaryManager {
     return effects;
   }
 
-  private inferRiskLevel(parsed: ReturnType<typeof parseCode>, content: string): FileSummary["riskLevel"] {
+  private inferRiskLevel(parsed: ParserResult, content: string): FileSummary["riskLevel"] {
     let score = 0;
     if (content.length > 500) score += 1;
     if (content.length > 2000) score += 1;

@@ -1,10 +1,11 @@
 import type {
   ContextPack, TaskType, ExtractedEntities, SearchParams,
   DecisionRecord, ProjectRule, FileSummary, ModuleSummary,
-  IndexConfig, ContextBudget,
+  IndexConfig, ContextBudget, CodeChunk,
 } from "../types.js";
 import { SQLiteStore } from "../stores/sqlite-store.js";
 import type { VectorStore } from "../stores/vector-store.js";
+import type { GraphStore } from "../stores/graph-store.js";
 import { SearchEngine } from "./search.js";
 import { classifyTask, extractEntities } from "./classify.js";
 import { rerankResults } from "./rerank.js";
@@ -12,12 +13,14 @@ import { rerankResults } from "./rerank.js";
 export class RetrievalPipeline {
   private store: SQLiteStore;
   private vectorStore: VectorStore;
+  private graphStore: GraphStore;
   private searchEngine: SearchEngine;
   private config: IndexConfig;
 
-  constructor(store: SQLiteStore, vectorStore: VectorStore, config: IndexConfig) {
+  constructor(store: SQLiteStore, vectorStore: VectorStore, graphStore: GraphStore, config: IndexConfig) {
     this.store = store;
     this.vectorStore = vectorStore;
+    this.graphStore = graphStore;
     this.searchEngine = new SearchEngine(store, vectorStore);
     this.config = config;
   }
@@ -27,6 +30,16 @@ export class RetrievalPipeline {
     recentFiles?: string[];
     budget?: ContextBudget;
   }): Promise<ContextPack> {
+    const warnings: string[] = [];
+    const budget = opts?.budget ?? {
+      totalTokens: 12000, systemRules: 800, taskMemory: 500,
+      moduleSummaries: 1200, decisionMemory: 800, codeSnippets: 5000,
+      currentFileContent: 2500, responseBudget: 1200, reserve: 1000,
+    };
+
+    // Stage 0: Check for stale memory
+    this.collectStaleWarnings(warnings);
+
     // Stage 1: Classify
     const taskType = classifyTask(task);
 
@@ -34,7 +47,7 @@ export class RetrievalPipeline {
     const entities = extractEntities(task);
 
     // Stage 3: Retrieve summaries first
-    const { moduleSummaries, fileSummaries, projectRules, decisions } = await this.retrieveSummaries(
+    let { moduleSummaries, fileSummaries, projectRules, decisions } = await this.retrieveSummaries(
       task, entities, taskType,
     );
 
@@ -42,33 +55,55 @@ export class RetrievalPipeline {
     const filesToInspect = this.determineFilesToInspect(entities, moduleSummaries, fileSummaries);
 
     // Stage 5: Fetch exact code snippets
-    const codeSnippets = await this.retrieveCodeSnippets(
+    let codeSnippets = await this.retrieveCodeSnippets(
       task, entities, filesToInspect, opts,
     );
 
     // Stage 6: Build risk assessment
-    const risk = this.assessRisk(fileSummaries, filesToInspect);
+    const risk = await this.assessRisk(fileSummaries, filesToInspect);
 
     // Stage 7: Build suggested workflow
     const suggestedWorkflow = this.buildWorkflow(taskType, filesToInspect);
 
+    // Stage 8: Enforce context budget
+    const trimmed = this.enforceBudget(budget, {
+      projectRules, decisions, moduleSummaries, fileSummaries: fileSummaries.slice(0, 8),
+      filesToInspect: filesToInspect.slice(0, 8), codeSnippets: codeSnippets.slice(0, 12),
+    }, warnings);
+
     const pack: ContextPack = {
       task,
       taskType,
-      projectRules,
-      decisions,
-      moduleSummaries,
-      fileSummaries: fileSummaries.slice(0, 8),
-      filesToInspect: filesToInspect.slice(0, 8),
-      codeSnippets: codeSnippets.slice(0, 12),
+      projectRules: trimmed.projectRules,
+      decisions: trimmed.decisions,
+      moduleSummaries: trimmed.moduleSummaries,
+      fileSummaries: trimmed.fileSummaries,
+      filesToInspect: trimmed.filesToInspect,
+      codeSnippets: trimmed.codeSnippets,
       risk,
       suggestedWorkflow,
-      estimatedTokens: this.estimateTokens({
-        projectRules, decisions, moduleSummaries, fileSummaries, codeSnippets,
-      }),
+      estimatedTokens: trimmed.estimatedTokens,
+      warnings,
     };
 
     return pack;
+  }
+
+  private collectStaleWarnings(warnings: string[]): void {
+    const staleFileSummaries = this.store.getFileSummariesByStatus("stale");
+    if (staleFileSummaries.length > 0) {
+      warnings.push(`⚠ ${staleFileSummaries.length} file summar${staleFileSummaries.length === 1 ? "y is" : "ies are"} stale. Run index_project or refresh_changed_files to refresh.`);
+    }
+
+    const dirtyModules = this.store.getAllModuleSummaries().filter(m => m.status === "dirty");
+    if (dirtyModules.length > 0) {
+      warnings.push(`⚠ ${dirtyModules.length} module summar${dirtyModules.length === 1 ? "y is" : "ies are"} dirty. Run index_project to refresh.`);
+    }
+
+    const staleFiles = this.store.getStaleFiles();
+    if (staleFiles.length > 0) {
+      warnings.push(`⚠ ${staleFiles.length} file${staleFiles.length === 1 ? "" : "s"} haven't been re-indexed after changes. Run refresh_changed_files.`);
+    }
   }
 
   private async retrieveSummaries(
@@ -229,7 +264,7 @@ export class RetrievalPipeline {
     return chunks.slice(0, 12);
   }
 
-  private assessRisk(fileSummaries: FileSummary[], filesToInspect: string[]): string {
+  private async assessRisk(fileSummaries: FileSummary[], filesToInspect: string[]): Promise<string> {
     const risks: string[] = [];
 
     for (const file of filesToInspect) {
@@ -245,7 +280,7 @@ export class RetrievalPipeline {
 
     // Check for affected relationships
     for (const file of filesToInspect) {
-      const affected = this.store.findAffectedFiles(file);
+      const affected = await this.graphStore.findAffectedFiles(file);
       if (affected.files.length > 2 || affected.tests.length > 0) {
         risks.push(`${file} affects ${affected.files.length} other files and ${affected.tests.length} tests`);
       }
@@ -307,7 +342,7 @@ export class RetrievalPipeline {
     decisions: DecisionRecord[];
     moduleSummaries: ModuleSummary[];
     fileSummaries: FileSummary[];
-    codeSnippets: import("../types.js").CodeChunk[];
+    codeSnippets: CodeChunk[];
   }): number {
     let total = 0;
     for (const r of data.projectRules) total += r.rule.length / 4;
@@ -316,6 +351,87 @@ export class RetrievalPipeline {
     for (const f of data.fileSummaries) total += f.summary.length / 4;
     for (const c of data.codeSnippets) total += c.chunk.length / 4;
     return Math.round(total);
+  }
+
+  private enforceBudget(
+    budget: ContextBudget,
+    data: {
+      projectRules: ProjectRule[];
+      decisions: DecisionRecord[];
+      moduleSummaries: ModuleSummary[];
+      fileSummaries: FileSummary[];
+      filesToInspect: string[];
+      codeSnippets: CodeChunk[];
+    },
+    warnings: string[],
+  ): {
+    projectRules: ProjectRule[];
+    decisions: DecisionRecord[];
+    moduleSummaries: ModuleSummary[];
+    fileSummaries: FileSummary[];
+    filesToInspect: string[];
+    codeSnippets: CodeChunk[];
+    estimatedTokens: number;
+  } {
+    const maxTokens = budget.totalTokens - budget.reserve;
+    let total = this.estimateTokens(data);
+
+    // Progressive trimming: remove lowest-value items first
+    const trimSteps: Array<{
+      name: string;
+      max: number;
+      limitKey: keyof ContextBudget;
+      // returns trimmed slice
+      trim: (current: number) => number;
+    }> = [
+      { name: "codeSnippets", max: 12, limitKey: "codeSnippets",
+        trim: (cur: number) => Math.max(6, Math.ceil(cur * 0.5)) },
+      { name: "fileSummaries", max: 8, limitKey: "moduleSummaries",
+        trim: (cur: number) => Math.max(4, Math.ceil(cur * 0.5)) },
+      { name: "moduleSummaries", max: 3, limitKey: "moduleSummaries",
+        trim: (_cur: number) => 1 },
+      { name: "decisions", max: 5, limitKey: "decisionMemory",
+        trim: (cur: number) => Math.max(2, Math.ceil(cur * 0.6)) },
+      { name: "projectRules", max: 5, limitKey: "systemRules",
+        trim: (cur: number) => Math.max(2, Math.ceil(cur * 0.6)) },
+    ];
+
+    for (const step of trimSteps) {
+      if (total <= maxTokens) break;
+      const sectionTokens = this.estimateTokens(data);
+      const limit = budget[step.limitKey] as number;
+      if (sectionTokens > limit) {
+        const arr = data[step.name as keyof typeof data] as unknown as any[];
+        const newCount = step.trim(arr.length);
+        if (newCount < arr.length) {
+          data[step.name as keyof typeof data] = arr.slice(0, newCount) as any;
+          warnings.push(`Trimmed ${step.name} from ${arr.length} to ${newCount} (budget: ${limit} tokens)`);
+          total = this.estimateTokens(data);
+        }
+      }
+    }
+
+    // Final fallback: halve everything until under budget
+    let safety = 0;
+    while (total > maxTokens && safety < 3) {
+      if (data.codeSnippets.length > 3) {
+        data.codeSnippets = data.codeSnippets.slice(0, Math.ceil(data.codeSnippets.length / 2));
+      } else if (data.fileSummaries.length > 2) {
+        data.fileSummaries = data.fileSummaries.slice(0, Math.ceil(data.fileSummaries.length / 2));
+      } else if (data.projectRules.length > 1) {
+        data.projectRules = data.projectRules.slice(0, Math.ceil(data.projectRules.length / 2));
+      } else {
+        break;
+      }
+      total = this.estimateTokens(data);
+      safety++;
+    }
+
+    if (total > maxTokens) {
+      warnings.push(`Context exceeds budget (${total} > ${maxTokens} tokens). Consider reducing query scope.`);
+    }
+
+    return { ...data, estimatedTokens: total };
   }
 
   async searchCode(query: string, limit = 10, includeTests = false): Promise<import("../types.js").SearchResult[]> {

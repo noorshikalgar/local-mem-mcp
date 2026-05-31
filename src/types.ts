@@ -13,7 +13,7 @@ export type ConfidenceScore = z.input<typeof ConfidenceScore>;
 // ─── Language ───────────────────────────────────────────────────────────────
 
 export const SupportedLanguage = z.enum([
-  "typescript", "javascript", "python", "rust", "go", "java",
+  "typescript", "javascript", "tsx", "python", "rust", "go", "java",
   "csharp", "cpp", "c", "ruby", "php", "swift", "kotlin",
   "yaml", "json", "markdown", "html", "css", "scss",
 ]);
@@ -213,6 +213,7 @@ export const ContextPack = z.object({
   risk: z.string().optional(),
   suggestedWorkflow: z.array(z.string()).default([]),
   estimatedTokens: z.number().default(0),
+  warnings: z.array(z.string()).default([]),
 });
 export type ContextPack = z.infer<typeof ContextPack>;
 
@@ -264,16 +265,25 @@ export type DiffSummary = z.infer<typeof DiffSummary>;
 export const IndexConfig = z.object({
   projectRoot: z.string(),
   includePatterns: z.array(z.string()).default(["**/*.ts", "**/*.tsx", "**/*.js", "**/*.jsx", "**/*.py", "**/*.rs", "**/*.go"]),
-  excludePatterns: z.array(z.string()).default(["node_modules/**", "dist/**", "build/**", ".git/**", "coverage/**", ".next/**", "target/**", "vendor/**"]),
+  excludePatterns: z.array(z.string()).default(["node_modules", "dist", "build", ".git", "coverage", ".next", "target", "vendor", ".test-tmp", "__pycache__", ".cache"]),
   maxFileSize: z.number().default(1024 * 100),
   chunkSize: z.number().default(50),
   chunkOverlap: z.number().default(10),
   useGit: z.boolean().default(true),
   useFileWatcher: z.boolean().default(true),
-  embeddingProvider: z.enum(["none", "local", "openai"]).default("none"),
+  embeddingProvider: z.enum(["none", "local", "openai", "qdrant"]).default("none"),
   embeddingApiUrl: z.string().optional(),
   embeddingApiKey: z.string().optional(),
   embeddingModel: z.string().default("bge-small"),
+  qdrantUrl: z.string().optional(),
+  qdrantApiKey: z.string().optional(),
+  neo4jUrl: z.string().optional(),
+  neo4jPassword: z.string().optional(),
+  vectorSize: z.number().default(384),
+  llmApiUrl: z.string().optional(),
+  llmApiKey: z.string().optional(),
+  llmModel: z.string().default("local-model"),
+  useLlmSummaries: z.boolean().default(false),
 });
 export type IndexConfig = z.infer<typeof IndexConfig>;
 

@@ -1,3 +1,4 @@
+import { QdrantClient } from "@qdrant/js-client-rest";
 import type { CodeChunk, DecisionRecord, SearchResult } from "../types.js";
 
 export interface VectorStore {
@@ -146,5 +147,201 @@ export class OpenAICompatibleVectorStore implements VectorStore {
   async clear(): Promise<void> {
     this.chunks.clear();
     this.decisions.clear();
+  }
+}
+
+export class QdrantVectorStore implements VectorStore {
+  private client: QdrantClient;
+  private embeddingApiUrl: string;
+  private embeddingApiKey: string;
+  private embeddingModel: string;
+  private chunkCollection: string;
+  private decisionCollection: string;
+  private vectorSize: number;
+  private ready: boolean = false;
+
+  constructor(opts: {
+    qdrantUrl: string;
+    qdrantApiKey?: string;
+    embeddingApiUrl: string;
+    embeddingApiKey?: string;
+    embeddingModel?: string;
+    chunkCollection?: string;
+    decisionCollection?: string;
+    vectorSize?: number;
+  }) {
+    this.embeddingApiUrl = opts.embeddingApiUrl.replace(/\/+$/, "");
+    this.embeddingApiKey = opts.embeddingApiKey || "";
+    this.embeddingModel = opts.embeddingModel || "bge-small";
+    this.chunkCollection = opts.chunkCollection || "code_chunks";
+    this.decisionCollection = opts.decisionCollection || "decisions";
+    this.vectorSize = opts.vectorSize || 384;
+
+    this.client = new QdrantClient({
+      url: opts.qdrantUrl,
+      apiKey: opts.qdrantApiKey,
+    });
+  }
+
+  private async ensureCollections(): Promise<void> {
+    if (this.ready) return;
+
+    for (const name of [this.chunkCollection, this.decisionCollection]) {
+      const exists = await this.client.collectionExists(name);
+      if (!exists.exists) {
+        await this.client.createCollection(name, {
+          vectors: {
+            size: this.vectorSize,
+            distance: "Cosine",
+          },
+        });
+      }
+    }
+    this.ready = true;
+  }
+
+  private async getEmbedding(text: string): Promise<number[]> {
+    const response = await fetch(`${this.embeddingApiUrl}/embeddings`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${this.embeddingApiKey}`,
+      },
+      body: JSON.stringify({
+        input: text,
+        model: this.embeddingModel,
+      }),
+    });
+
+    if (!response.ok) {
+      throw new Error(`Embedding API error: ${response.status} ${await response.text()}`);
+    }
+
+    const data = await response.json() as any;
+    return data.data[0].embedding;
+  }
+
+  async indexChunks(chunks: CodeChunk[]): Promise<void> {
+    await this.ensureCollections();
+
+    const points: Array<{ id: string; vector: number[]; payload: Record<string, unknown> }> = [];
+    for (const chunk of chunks) {
+      const text = `${chunk.file}\n${chunk.chunk}`;
+      try {
+        const embedding = await this.getEmbedding(text);
+        points.push({
+          id: chunk.id,
+          vector: embedding,
+          payload: {
+            file: chunk.file,
+            language: chunk.language,
+            startLine: chunk.startLine,
+            endLine: chunk.endLine,
+            symbols: chunk.symbols,
+            imports: chunk.imports,
+            exports: chunk.exports,
+            status: chunk.status,
+          },
+        });
+      } catch (err) {
+        console.error(`Failed to embed chunk ${chunk.id}:`, err);
+      }
+    }
+
+    if (points.length > 0) {
+      await this.client.upsert(this.chunkCollection, { points });
+    }
+  }
+
+  async searchChunks(query: string, limit = 10): Promise<SearchResult[]> {
+    await this.ensureCollections();
+
+    const queryEmbedding = await this.getEmbedding(query);
+
+    const result = await this.client.search(this.chunkCollection, {
+      vector: queryEmbedding,
+      limit,
+      with_payload: true,
+    });
+
+    return result.map((r) => ({
+      file: (r.payload as any)?.file || "",
+      startLine: (r.payload as any)?.startLine || 0,
+      endLine: (r.payload as any)?.endLine || 0,
+      score: r.score || 0,
+      whyMatched: `semantic similarity: ${((r.score || 0) * 100).toFixed(1)}%`,
+      codeSnippet: "",
+      language: (r.payload as any)?.language,
+      status: (r.payload as any)?.status || "fresh",
+    }));
+  }
+
+  async indexDecisions(decisions: DecisionRecord[]): Promise<void> {
+    await this.ensureCollections();
+
+    const points: Array<{ id: string; vector: number[]; payload: Record<string, unknown> }> = [];
+    for (const d of decisions) {
+      const text = `${d.title}\n${d.decision}\n${d.reason}`;
+      try {
+        const embedding = await this.getEmbedding(text);
+        points.push({
+          id: d.id,
+          vector: embedding,
+          payload: {
+            title: d.title,
+            area: d.area,
+            decision: d.decision,
+            reason: d.reason,
+            files: d.files,
+            status: d.status,
+          },
+        });
+      } catch (err) {
+        console.error(`Failed to embed decision ${d.id}:`, err);
+      }
+    }
+
+    if (points.length > 0) {
+      await this.client.upsert(this.decisionCollection, { points });
+    }
+  }
+
+  async searchDecisions(query: string, limit = 10): Promise<SearchResult[]> {
+    await this.ensureCollections();
+
+    const queryEmbedding = await this.getEmbedding(query);
+
+    const result = await this.client.search(this.decisionCollection, {
+      vector: queryEmbedding,
+      limit,
+      with_payload: true,
+    });
+
+    return result.map((r) => ({
+      file: ((r.payload as any)?.files as string[])?.join(", ") || "",
+      startLine: 0,
+      endLine: 0,
+      score: r.score || 0,
+      whyMatched: `semantic similarity: ${((r.score || 0) * 100).toFixed(1)}%`,
+      codeSnippet: (r.payload as any)?.decision || "",
+      status: (r.payload as any)?.status || "fresh",
+    }));
+  }
+
+  async deleteVectorsForFile(file: string): Promise<void> {
+    await this.ensureCollections();
+
+    await this.client.delete(this.chunkCollection, {
+      filter: {
+        must: [{ key: "file", match: { value: file } }],
+      },
+    });
+  }
+
+  async clear(): Promise<void> {
+    await this.ensureCollections();
+    await this.client.deleteCollection(this.chunkCollection);
+    await this.client.deleteCollection(this.decisionCollection);
+    this.ready = false;
   }
 }
