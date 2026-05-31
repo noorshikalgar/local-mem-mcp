@@ -8,3 +8,5 @@ coverage/
 .test-tmp/
 *.db-shm
 *.db-wal
+
+Plan.md
