@@ -1,0 +1,38 @@
+{
+  "name": "local-mem-mcp",
+  "version": "0.1.0",
+  "description": "Development memory layer MCP server for local coding models",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "local-mem-mcp": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx watch src/index.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "lint": "eslint src/",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": ["mcp", "memory", "local-llm", "coding-assistant"],
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.8.0",
+    "better-sqlite3": "^11.7.0",
+    "chokidar": "^4.0.3",
+    "ignore": "^7.0.3",
+    "strip-json-comments": "^5.0.1",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/node": "^22.10.0",
+    "eslint": "^9.16.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  }
+}
